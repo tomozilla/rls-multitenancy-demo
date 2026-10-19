@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Invoice portal (RLS demo)</title>
+<style>
+  :root { --ink:#1f2933; --sub:#6b7785; --line:#e3e8ee; --bg:#f4f6f9; --brand:#2563eb; --good:#16a34a; --bad:#dc2626; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif; line-height:1.6; }
+  header { background:#fff; border-bottom:1px solid var(--line); padding:14px 28px; display:flex; align-items:center; gap:14px; }
+  header h1 { margin:0; font-size:18px; } header .who { margin-left:auto; text-align:right; font-size:12.5px; color:var(--sub); }
+  header .tenant { font-size:15px; font-weight:800; color:var(--ink); }
+  main { max-width:900px; margin:22px auto; padding:0 20px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:14px; padding:18px 20px; margin-bottom:18px; }
+  h2 { margin:0 0 10px; font-size:14px; color:var(--sub); font-weight:600; }
+  input, button { font:inherit; } input { width:100%; padding:10px 12px; border:1px solid #cdd5df; border-radius:10px; }
+  button { border:0; border-radius:10px; padding:10px 16px; background:var(--brand); color:#fff; font-weight:600; cursor:pointer; white-space:nowrap; }
+  button.ghost { background:#eef2f7; color:var(--ink); font-weight:500; } button:disabled { opacity:.5; }
+  label { display:block; font-size:12.5px; color:var(--sub); margin:10px 0 4px; }
+  .login { max-width:380px; margin:60px auto; } .login h2 { font-size:18px; color:var(--ink); }
+  .stats { display:grid; grid-template-columns:1fr 1fr; gap:14px; } .stat .n { font-size:26px; font-weight:800; } .stat .l { color:var(--sub); font-size:12.5px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; } th, td { padding:9px 8px; border-top:1px solid var(--line); text-align:left; } th { border-top:0; color:var(--sub); font-weight:600; font-size:12.5px; }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .row { display:grid; grid-template-columns:1fr 160px auto; gap:10px; align-items:end; }
+  .msg { font-size:13px; margin-top:10px; padding:9px 12px; border-radius:10px; } .msg.ok { background:#dcfce7; color:#14532d; } .msg.ng { background:#fee2e2; color:#7f1d1d; } .msg.info { background:#e0e7ff; color:#312e81; }
+  pre { background:#1f2430; color:#e8e8e8; padding:10px 12px; border-radius:8px; font-size:12px; overflow:auto; margin:8px 0; }
+  .dev { border:1px dashed #cdd5df; } .dev .btns { display:flex; gap:10px; flex-wrap:wrap; margin-top:8px; }
+  #err { background:#fee2e2; color:#7f1d1d; border:1px solid #fca5a5; padding:10px 14px; border-radius:10px; font-size:13px; margin-bottom:14px; display:none; }
+</style>
+<script src="config.js"></script>
+</head>
+<body>
+<header>
+  <h1>Invoice portal</h1>
+  <div class="who" id="who"></div>
+</header>
+<main>
+  <div id="err"></div>
+  <div id="app"></div>
+</main>
+<script type="module">
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+
+const cfg = window.APP_CONFIG
+const $ = (id) => document.getElementById(id)
+const showErr = (m) => { $('err').style.display = m ? 'block' : 'none'; $('err').textContent = m || '' }
+if (!cfg || !cfg.SUPABASE_URL || !cfg.SUPABASE_PUBLISHABLE_KEY) {
+  showErr('config.js is missing. Copy config.example.js to config.js and fill in the values.'); throw new Error('config.js is missing')
+}
+const supabase = createClient(cfg.SUPABASE_URL, cfg.SUPABASE_PUBLISHABLE_KEY)
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+const yen = (n) => '¥' + Number(n).toLocaleString('ja-JP')
+
+function renderLogin() {
+  $('who').innerHTML = ''
+  $('app').innerHTML = `<div class="card login"><h2>Log in</h2>
+    <label>Email address</label><input id="email" type="email" autocomplete="username">
+    <label>Password</label><input id="password" type="password" autocomplete="current-password">
+    <div style="margin-top:16px"><button id="login">Log in</button></div>
+    <div class="msg info" style="margin-top:16px">Demo only. Log in with a user you created in Authentication.</div></div>`
+  $('login').onclick = async () => {
+    showErr(''); $('login').disabled = true
+    const { error } = await supabase.auth.signInWithPassword({ email: $('email').value.trim(), password: $('password').value })
+    if (error) { showErr('Could not log in: ' + error.message); $('login').disabled = false }
+  }
+  $('password').onkeydown = (e) => { if (e.key === 'Enter') $('login').click() }
+}
+
+async function renderPortal(session) {
+  // My memberships (thanks to RLS, only my own rows come back)
+  const { data: mem, error: e1 } = await supabase.from('memberships').select('tenant_id, tenants(name)')
+  if (e1) { showErr('Could not read memberships: ' + e1.message); return }
+  if (!mem.length) { $('app').innerHTML = `<div class="card">This user does not belong to any tenant.</div>`; return }
+  const tenant = { id: mem[0].tenant_id, name: mem[0].tenants.name }
+  $('who').innerHTML = `<div class="tenant">${esc(tenant.name)}</div><div>${esc(session.user.email)} <button class="ghost" id="logout" style="padding:3px 10px;font-size:12px">Log out</button></div>`
+  $('logout').onclick = () => supabase.auth.signOut()
+
+  // NOTE: there is no "filter by tenant_id" condition here. The database (RLS) decides which rows are visible.
+  const { data: invoices, error: e2 } = await supabase.from('invoices').select('id, title, amount_jpy').order('id')
+  if (e2) { showErr('Could not read invoices: ' + e2.message); return }
+  const total = invoices.reduce((s, r) => s + r.amount_jpy, 0)
+
+  $('app').innerHTML = `
+    <div class="card"><div class="stats">
+      <div class="stat"><div class="n">${invoices.length}</div><div class="l">Invoices of your company</div></div>
+      <div class="stat"><div class="n">${yen(total)}</div><div class="l">Total</div></div></div></div>
+    <div class="card"><h2>Invoices</h2>
+      <table><thead><tr><th>#</th><th>Title</th><th class="num">Amount</th></tr></thead>
+      <tbody>${invoices.map((r) => `<tr><td>${r.id}</td><td>${esc(r.title)}</td><td class="num">${yen(r.amount_jpy)}</td></tr>`).join('') || '<tr><td colspan="3">None yet</td></tr>'}</tbody></table></div>
+    <div class="card"><h2>Add an invoice</h2>
+      <div class="row"><div><label>Title</label><input id="title" maxlength="100"></div><div><label>Amount (JPY)</label><input id="amount" type="number" min="0" step="1"></div><button id="add">Add</button></div>
+      <div id="addmsg"></div></div>
+    <div class="card dev"><h2>Developer tests (is RLS really working?)</h2>
+      <div style="font-size:13px;color:var(--sub)">The page code has no condition that filters by tenant. You still see only your own company's rows because of the rule on the database side (RLS).</div>
+      <div class="btns"><button class="ghost" id="t1">1. Read everything, with no filter</button><button class="ghost" id="t2">2. Try to add an invoice with another tenant's ID</button></div>
+      <div id="devmsg1"></div><div id="devmsg2"></div></div>`
+
+  $('add').onclick = async () => {
+    const title = $('title').value.trim(), amount = Number($('amount').value)
+    if (!title || !Number.isInteger(amount) || amount < 0) { $('addmsg').innerHTML = `<div class="msg ng">Enter a title and an integer amount of 0 or more</div>`; return }
+    $('add').disabled = true
+    const { error } = await supabase.from('invoices').insert({ tenant_id: tenant.id, title, amount_jpy: amount })
+    if (error) { $('addmsg').innerHTML = `<div class="msg ng">Could not add: ${esc(error.message)}</div>`; $('add').disabled = false; return }
+    await renderPortal(session)
+  }
+  $('t1').onclick = async () => {
+    const { data, error } = await supabase.from('invoices').select('id')          // no filter
+    $('devmsg1').innerHTML = error ? `<div class="msg ng">${esc(error.message)}</div>`
+      : `<pre>supabase.from('invoices').select('id')   // no where, no eq</pre><div class="msg ok">${data.length} row(s) came back. I asked for every company's invoices, but only my own ${data.length} are visible.</div>`
+  }
+  $('t2').onclick = async () => {
+    const otherTenant = crypto.randomUUID()   // I cannot see another tenant's ID, so try a random one
+    const { error } = await supabase.from('invoices').insert({ tenant_id: otherTenant, title: 'Sneaky invoice', amount_jpy: 1 })
+    $('devmsg2').innerHTML = `<pre>insert({ tenant_id: '${otherTenant}', ... })</pre>` +
+      (error ? `<div class="msg ok">Rejected (${esc(error.code || '')}): ${esc(error.message)}</div>` : `<div class="msg ng">The insert went through. Check your RLS setup.</div>`)
+  }
+}
+
+async function render(session) { showErr(''); if (session) await renderPortal(session); else renderLogin() }
+supabase.auth.onAuthStateChange((_event, session) => { render(session) })
+</script>
+</body>
+</html>
